@@ -2,64 +2,77 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="Анализатор", layout="centered")
-st.title("📊 Отчет по курсам (Оптимизированный)")
+st.set_page_config(page_title="Анализатор (Fast Mode)", layout="centered")
+st.title("🚀 Быстрый отчет (Предфильтрация)")
 
-# Функция загрузки с использованием Calamine (самый быстрый движок)
-@st.cache_data(show_spinner=False)
-def load_data(file):
-    try:
-        # Читаем только нужные колонки, чтобы сэкономить 80% памяти
-        target_cols = ["courses.id", "Область", "Дата получения сертификата", "Наименование_курса"]
-        df = pd.read_excel(file, engine='calamine', dtype=str)
-        
-        # Чистим названия колонок
-        df.columns = [str(c).strip() for c in df.columns]
-        
-        # Оставляем только те колонки, которые реально нужны для анализа
-        existing_cols = [c for c in target_cols if c in df.columns]
-        return df[existing_cols]
-    except Exception as e:
-        return str(e)
+st.info("Этот режим экономит память: мы ищем только нужный ID сразу при чтении.")
 
-uploaded_file = st.file_uploader("Загрузите файл", type=["xlsx"])
+# Поле ввода ID ДО загрузки или вместе с ней
+course_id = st.text_input("1. Введите ID курса (например, 52)", key="course_id").strip()
 
-if uploaded_file:
-    with st.spinner('⏳ Обработка данных... Пожалуйста, не закрывайте вкладку'):
-        data = load_data(uploaded_file)
-    
-    if isinstance(data, str):
-        st.error(f"Ошибка: {data}")
-    else:
-        st.success("✅ Данные загружены!")
-        
-        mode = st.radio("Режим:", ["Все курсы", "По ID"], horizontal=True)
-        c_id = st.text_input("Введите ID курса") if mode == "По ID" else None
+uploaded_file = st.file_uploader("2. Загрузите файл Excel", type=["xlsx"])
 
-        if st.button("📊 Сгенерировать отчет"):
-            # Фильтрация
-            filtered = data[data["courses.id"] == c_id.strip()] if c_id else data
+if uploaded_file and course_id:
+    with st.status("🔍 Ищу данные по курсу " + course_id + "...") as status:
+        try:
+            # Используем calamine для скорости
+            # Читаем только нужные колонки
+            df_iter = pd.read_excel(uploaded_file, engine='calamine', dtype=str)
             
-            if filtered.empty:
-                st.warning("Ничего не найдено")
+            # Чистим заголовки
+            df_iter.columns = [str(c).strip() for c in df_iter.columns]
+            
+            # Сразу фильтруем, чтобы не хранить лишнее в памяти
+            col_id = "courses.id"
+            if col_id in df_iter.columns:
+                filtered_df = df_iter[df_iter[col_id] == course_id].copy()
+                
+                if filtered_df.empty:
+                    st.warning(f"Курс с ID {course_id} не найден в файле.")
+                    st.stop()
+                
+                status.update(label="✅ Данные найдены!", state="complete")
             else:
-                # Считаем итоги
-                filtered['has_cert'] = filtered["Дата получения сертификата"].notna()
+                st.error(f"Колонка {col_id} не найдена!")
+                st.stop()
                 
-                report = filtered.groupby("Область").agg(
-                    total=("Область", "count"),
-                    with_cert=("has_cert", "sum")
-                ).reset_index()
-                
-                report["no_cert"] = report["total"] - report["with_cert"]
-                report = report.sort_values("total", ascending=False)
+        except Exception as e:
+            st.error(f"Ошибка: {e}")
+            st.stop()
 
-                # Вывод
-                st.write(f"### Итоги по выбору:")
-                st.metric("Всего студентов", len(filtered))
-                st.dataframe(report, use_container_width=True)
+    # Анализ только отфильтрованных данных
+    col_region = "Область"
+    col_cert = "Дата получения сертификата"
+    
+    if col_region in filtered_df.columns:
+        # Логика сертификатов
+        filtered_df['has_cert'] = filtered_df[col_cert].notna() & (filtered_df[col_cert].astype(str).str.lower() != 'nan')
+        
+        report = filtered_df.groupby(col_region).agg(
+            total=(col_region, 'count'),
+            with_cert=('has_cert', 'sum')
+        ).reset_index()
+        
+        report['no_cert'] = report['total'] - report['with_cert']
+        report = report.sort_values('total', ascending=False)
 
-                # Простая кнопка скачивания
-                output = BytesIO()
-                report.to_excel(output, index=False)
-                st.download_button("💾 Скачать Excel", output.getvalue(), "report.xlsx")
+        # Интерфейс
+        st.divider()
+        st.subheader(f"Результаты для курса №{course_id}")
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Всего чел.", int(report['total'].sum()))
+        m2.metric("С сертификатом", int(report['with_cert'].sum()))
+        m3.metric("Без сертификата", int(report['no_cert'].sum()))
+
+        st.dataframe(report, use_container_width=True)
+
+        # Скачивание
+        output = BytesIO()
+        report.to_excel(output, index=False)
+        st.download_button("💾 Скачать отчет по ID " + course_id, output.getvalue(), f"report_{course_id}.xlsx")
+    else:
+        st.error("Колонка 'Область' не найдена.")
+
+elif uploaded_file and not course_id:
+    st.warning("⚠️ Сначала введите ID курса в поле выше, чтобы начать поиск.")
