@@ -1,65 +1,65 @@
 import streamlit as st
 import pandas as pd
-from openpyxl import Workbook
 from io import BytesIO
 
-st.set_page_config(page_title="Анализатор курсов", layout="wide")
-st.title("📊 Отчет по курсам (Оптимизировано)")
+st.set_page_config(page_title="Анализатор", layout="centered")
+st.title("📊 Отчет по курсам (Оптимизированный)")
 
+# Функция загрузки с использованием Calamine (самый быстрый движок)
 @st.cache_data(show_spinner=False)
-def load_optimized_data(file):
-    # Используем движок calamine — он намного быстрее и легче для памяти
-    data = pd.read_excel(file, engine='calamine', dtype=str)
-    # Убираем пробелы в названиях колонок
-    data.columns = [str(c).strip() for c in data.columns]
-    return data
+def load_data(file):
+    try:
+        # Читаем только нужные колонки, чтобы сэкономить 80% памяти
+        target_cols = ["courses.id", "Область", "Дата получения сертификата", "Наименование_курса"]
+        df = pd.read_excel(file, engine='calamine', dtype=str)
+        
+        # Чистим названия колонок
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # Оставляем только те колонки, которые реально нужны для анализа
+        existing_cols = [c for c in target_cols if c in df.columns]
+        return df[existing_cols]
+    except Exception as e:
+        return str(e)
 
-uploaded_file = st.file_uploader("Выберите файл Excel", type=["xlsx", "xls"])
+uploaded_file = st.file_uploader("Загрузите файл", type=["xlsx"])
 
 if uploaded_file:
-    # Используем контейнер, чтобы визуально всё было чисто
-    with st.status("🚀 Загрузка и обработка данных...", expanded=True) as status:
-        try:
-            df = load_optimized_data(uploaded_file)
-            status.update(label="✅ Данные готовы!", state="complete", expanded=False)
-        except Exception as e:
-            st.error(f"Ошибка памяти или формата: {e}")
-            st.stop()
-
-    col_id = "courses.id"
-    col_region = "Область"
-    col_cert = "Дата получения сертификата"
+    with st.spinner('⏳ Обработка данных... Пожалуйста, не закрывайте вкладку'):
+        data = load_data(uploaded_file)
     
-    if col_id in df.columns and col_region in df.columns:
-        st.divider()
-        mode = st.radio("Фильтр:", ["Все", "По ID"], horizontal=True)
+    if isinstance(data, str):
+        st.error(f"Ошибка: {data}")
+    else:
+        st.success("✅ Данные загружены!")
         
-        c_id = ""
-        if mode == "По ID":
-            c_id = st.text_input("Введите ID курса").strip()
+        mode = st.radio("Режим:", ["Все курсы", "По ID"], horizontal=True)
+        c_id = st.text_input("Введите ID курса") if mode == "По ID" else None
 
-        if st.button("📊 ПОКАЗАТЬ АНАЛИЗ", type="primary"):
-            # Фильтруем
-            filtered = df[df[col_id] == c_id].copy() if (mode == "По ID" and c_id) else df.copy()
+        if st.button("📊 Сгенерировать отчет"):
+            # Фильтрация
+            filtered = data[data["courses.id"] == c_id.strip()] if c_id else data
             
             if filtered.empty:
                 st.warning("Ничего не найдено")
             else:
-                # Быстрый расчет без лишних колонок
-                filtered['has_cert'] = filtered[col_cert].notna()
-                res = filtered.groupby(col_region).size().reset_index(name='total')
-                certs = filtered[filtered['has_cert']].groupby(col_region).size().reset_index(name='with_cert')
+                # Считаем итоги
+                filtered['has_cert'] = filtered["Дата получения сертификата"].notna()
                 
-                report = pd.merge(res, certs, on=col_region, how='left').fillna(0)
-                report['no_cert'] = report['total'] - report['with_cert']
+                report = filtered.groupby("Область").agg(
+                    total=("Область", "count"),
+                    with_cert=("has_cert", "sum")
+                ).reset_index()
                 
-                # Итоги
-                st.metric("Всего по выборке", int(report['total'].sum()))
-                st.dataframe(report.sort_values('total', ascending=False), use_container_width=True)
-                
-                # Кнопка скачивания появится сразу под таблицей
+                report["no_cert"] = report["total"] - report["with_cert"]
+                report = report.sort_values("total", ascending=False)
+
+                # Вывод
+                st.write(f"### Итоги по выбору:")
+                st.metric("Всего студентов", len(filtered))
+                st.dataframe(report, use_container_width=True)
+
+                # Простая кнопка скачивания
                 output = BytesIO()
                 report.to_excel(output, index=False)
-                st.download_button("💾 Скачать результат", output.getvalue(), "report.xlsx")
-    else:
-        st.error(f"Колонки не найдены. Доступны: {list(df.columns[:5])}...")
+                st.download_button("💾 Скачать Excel", output.getvalue(), "report.xlsx")
